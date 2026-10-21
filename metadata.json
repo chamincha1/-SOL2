@@ -1,0 +1,8 @@
+{
+  "name": "-SOL2: Hotspot & V2G Simulation",
+  "description": "핫스팟 현상과 V2G 기술을 결합한 스마트 그리드 시뮬레이션 플랫폼 (-SOL2)",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
