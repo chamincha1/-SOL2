@@ -25,6 +25,7 @@ import { ComparisonLab } from './components/ComparisonLab.tsx';
 import { TimelineScrubber } from './components/TimelineScrubber.tsx';
 import { SavedExperimentsView } from './components/SavedExperimentsView.tsx';
 import { SaveExperimentModal } from './components/SaveExperimentModal.tsx';
+import { EnvironmentLogModal } from './components/EnvironmentLogModal.tsx';
 
 // Pre-seeded initial experiments matching Table 6-1 from Research Paper
 const INITIAL_PRESEEDED_RUNS: SavedExperiment[] = [
@@ -43,6 +44,10 @@ const INITIAL_PRESEEDED_RUNS: SavedExperiment[] = [
       lat: 0.5,
       speed: 20,
       brush: '0.6',
+      tempJitter: false,
+      windJitter: false,
+      solarJitter: false,
+      dynamicCloud: false,
     },
     shade: (() => {
       const s = new Array(N_CELLS).fill(0);
@@ -79,6 +84,10 @@ const INITIAL_PRESEEDED_RUNS: SavedExperiment[] = [
       lat: 0.5,
       speed: 20,
       brush: '0.6',
+      tempJitter: false,
+      windJitter: false,
+      solarJitter: false,
+      dynamicCloud: false,
     },
     shade: (() => {
       const s = new Array(N_CELLS).fill(0);
@@ -115,6 +124,10 @@ const INITIAL_PRESEEDED_RUNS: SavedExperiment[] = [
       lat: 0.5,
       speed: 20,
       brush: '0.6',
+      tempJitter: false,
+      windJitter: false,
+      solarJitter: false,
+      dynamicCloud: false,
     },
     shade: (() => {
       const s = new Array(N_CELLS).fill(0);
@@ -156,6 +169,10 @@ export const App: React.FC = () => {
     lat: 0.5,
     speed: 20,
     brush: '0.6',
+    tempJitter: false,
+    windJitter: false,
+    solarJitter: false,
+    dynamicCloud: false,
   });
 
   // Material direct configurator state
@@ -197,6 +214,11 @@ export const App: React.FC = () => {
   // Current calculated metrics snapshot
   const [metrics, setMetrics] = useState<SimulationMetrics | null>(null);
 
+  // Separate atmospheric stochastic jitter (random walk) state variables
+  const [taJitter, setTaJitter] = useState<number>(0);
+  const [wsJitter, setWsJitter] = useState<number>(0);
+  const [gJitter, setGJitter] = useState<number>(0);
+
   // Saved Experiments list (persisted in localStorage)
   const [savedRuns, setSavedRuns] = useState<SavedExperiment[]>(() => {
     try {
@@ -213,6 +235,19 @@ export const App: React.FC = () => {
 
   // Save Modal open state
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+
+  // Environmental Timeline Log Modal open state
+  const [isEnvLogModalOpen, setIsEnvLogModalOpen] = useState(false);
+
+  // Clear Environmental Log
+  const handleClearEnvLog = useCallback(() => {
+    setSimState((prev) => {
+      const updated = { ...prev, envLog: [] };
+      simStateRef.current = updated;
+      return updated;
+    });
+    showToast('환경 변동 타임라인 로그가 초기화되었습니다.');
+  }, []);
 
   // Toast alert
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -236,6 +271,11 @@ export const App: React.FC = () => {
   const accDtRef = useRef<number>(0);
   const reqRef = useRef<number | null>(null);
 
+  // Separate refs for independent random walk state (ensures strict decoupling and zero-lag physics updates)
+  const taJitterRef = useRef<number>(0);
+  const wsJitterRef = useRef<number>(0);
+  const gJitterRef = useRef<number>(0);
+
   const envRef = useRef(env);
   envRef.current = env;
   const shadeRef = useRef(shade);
@@ -253,6 +293,12 @@ export const App: React.FC = () => {
 
   // Reset simulation time and temperatures
   const handleResetTime = useCallback(() => {
+    taJitterRef.current = 0;
+    wsJitterRef.current = 0;
+    gJitterRef.current = 0;
+    setTaJitter(0);
+    setWsJitter(0);
+    setGJitter(0);
     const tm = calculateTm(envRef.current);
     const fresh = createNewSimState(tm);
     simStateRef.current = fresh;
@@ -456,6 +502,60 @@ export const App: React.FC = () => {
           let lastRes: SimulationMetrics | null = null;
 
           while (accDtRef.current >= 0.5 && steps < 6) {
+            // Optional Dynamic Cloud Drift (Section 5.6)
+            if (currentEnv.dynamicCloud) {
+              const colCenter = Math.floor((currentS.t * (currentEnv.Ws + 0.5) * 0.12) % 15) - 2;
+              for (let r = 0; r < 6; r++) {
+                for (let c = 0; c < 10; c++) {
+                  const idx = r * 10 + c;
+                  if (!currentDefect[idx] && currentShade[idx] !== 0.6 && currentShade[idx] !== 1.0) {
+                    const dist = Math.abs(c - colCenter);
+                    if (dist <= 1 && r >= 1 && r <= 4) {
+                      currentShade[idx] = currentMatCfg.cloudShade;
+                    } else if (currentShade[idx] === currentMatCfg.cloudShade) {
+                      currentShade[idx] = 0;
+                    }
+                  }
+                }
+              }
+            }
+
+            // 1. Ambient Temperature (Ta) Independent Random Walk:
+            // Sluggish thermal mass drift strictly bounded within ±5.0°C of base setpoint
+            if (currentEnv.tempJitter) {
+              const xi_Ta = (Math.random() - 0.5) * 2;
+              const dtStep = 0.5;
+              const meanReversion = -0.05 * taJitterRef.current * dtStep;
+              const diffusion = 0.38 * Math.sqrt(dtStep) * xi_Ta;
+              taJitterRef.current = Math.max(-5.0, Math.min(5.0, taJitterRef.current + meanReversion + diffusion));
+            } else {
+              taJitterRef.current = 0;
+            }
+
+            // 2. Wind Speed (Ws) Independent Random Walk:
+            // Aerodynamic turbulent gust dynamics (m/s), independent noise & higher frequency
+            if (currentEnv.windJitter) {
+              const xi_Ws = (Math.random() - 0.5) * 2;
+              const dtStep = 0.5;
+              const meanReversion = -0.14 * wsJitterRef.current * dtStep;
+              const diffusion = 0.32 * Math.sqrt(dtStep) * xi_Ws;
+              wsJitterRef.current = Math.max(-currentEnv.Ws, Math.min(6.0, wsJitterRef.current + meanReversion + diffusion));
+            } else {
+              wsJitterRef.current = 0;
+            }
+
+            // 3. Solar Irradiation (G) Independent Random Walk:
+            // Optical atmospheric transmission & cloud micro-edge jitter (W/m²), independent noise
+            if (currentEnv.solarJitter) {
+              const xi_G = (Math.random() - 0.5) * 2;
+              const dtStep = 0.5;
+              const meanReversion = -0.10 * gJitterRef.current * dtStep;
+              const diffusion = 14.0 * Math.sqrt(dtStep) * xi_G;
+              gJitterRef.current = Math.max(-100, Math.min(100, gJitterRef.current + meanReversion + diffusion));
+            } else {
+              gJitterRef.current = 0;
+            }
+
             lastRes = runSimulationStep(
               currentS,
               currentEnv,
@@ -463,6 +563,11 @@ export const App: React.FC = () => {
               currentDefect,
               0.5,
               currentMatCfg.defectRsh,
+              {
+                deltaTa: taJitterRef.current,
+                deltaWs: wsJitterRef.current,
+                deltaG: gJitterRef.current,
+              },
             );
             accDtRef.current -= 0.5;
             steps++;
@@ -472,6 +577,9 @@ export const App: React.FC = () => {
           if (steps > 0 && lastRes) {
             setMetrics(lastRes);
             setSimState({ ...currentS });
+            setTaJitter(taJitterRef.current);
+            setWsJitter(wsJitterRef.current);
+            setGJitter(gJitterRef.current);
           }
         }
       } else {
@@ -482,6 +590,11 @@ export const App: React.FC = () => {
           currentDefect,
           0,
           currentMatCfg.defectRsh,
+          {
+            deltaTa: taJitterRef.current,
+            deltaWs: wsJitterRef.current,
+            deltaG: gJitterRef.current,
+          },
         );
         setMetrics(staticRes);
       }
@@ -605,6 +718,7 @@ export const App: React.FC = () => {
               onResetTime={handleResetTime}
               onScrubTime={handleScrubTime}
               onOpenSaveModal={() => setIsSaveModalOpen(true)}
+              onOpenEnvLogModal={() => setIsEnvLogModalOpen(true)}
             />
 
             {/* 2-Zone Sandbox: Canvas (7 cols) + Direct Material Controls (5 cols) */}
@@ -630,15 +744,23 @@ export const App: React.FC = () => {
                   materialConfig={materialConfig}
                   setMaterialConfig={setMaterialConfig}
                   onApplyMaterialAction={handleApplyMaterialAction}
+                  metrics={metrics}
+                  taJitter={taJitter}
+                  wsJitter={wsJitter}
+                  gJitter={gJitter}
+                  onOpenEnvLogModal={() => setIsEnvLogModalOpen(true)}
+                  envLogCount={simState.envLog?.length || 0}
                 />
               </div>
             </div>
 
-            {/* Live Waveform Graphs (Enlarged with hover inspector) */}
+            {/* Live Waveform Graphs (Enlarged with hover inspector & Environment Jitter Waveforms) */}
             <WaveformCharts
               history={simState.h}
               elapsedTime={simState.t}
               maxT={simState.maxT}
+              envLog={simState.envLog}
+              onOpenEnvLogModal={() => setIsEnvLogModalOpen(true)}
             />
           </div>
         )}
@@ -679,6 +801,16 @@ export const App: React.FC = () => {
         t130Sec={simState.t130}
         maxT={simState.maxT}
         onSave={handleSaveCurrentExperiment}
+      />
+
+      {/* Environmental Variables Timeline Data Log Modal */}
+      <EnvironmentLogModal
+        isOpen={isEnvLogModalOpen}
+        onClose={() => setIsEnvLogModalOpen(false)}
+        envLog={simState.envLog || []}
+        env={env}
+        currentTimeSec={simState.t}
+        onClearLog={handleClearEnvLog}
       />
 
       {/* Footer */}

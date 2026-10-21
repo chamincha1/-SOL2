@@ -6,6 +6,12 @@ import {
   SimulationMetrics,
   ComparisonRow,
   SweepPoint,
+  ExperimentBLocation,
+  ExperimentBRow,
+  ExperimentDRow,
+  OperationPoint,
+  StochasticJitterOffset,
+  EnvironmentLogPoint,
 } from '../types/solar.ts';
 
 export const N_CELLS = 60;
@@ -67,6 +73,50 @@ export function getCoolingParameters(cooling: CoolingMode) {
   }
 
   return { U0, U1, rthNormal, rthDefect, ct };
+}
+
+// Compute independent environmental fluctuations
+export function calcIndependentFluctuation(
+  baseEnv: EnvironmentState,
+  timeSec: number,
+): { effectiveTa: number; effectiveWs: number; effectiveG: number } {
+  let effectiveTa = baseEnv.Ta;
+  let effectiveWs = baseEnv.Ws;
+  let effectiveG = baseEnv.G;
+
+  // 1. Ambient Temperature independent ±5°C fluctuation (Sluggish thermal inertia)
+  if (baseEnv.tempJitter) {
+    // Multi-frequency thermal drift strictly bounded within ±5°C of base setpoint
+    const deltaT =
+      3.2 * Math.sin(0.04 * timeSec + 0.3) +
+      1.8 * Math.cos(0.015 * timeSec + 1.2) +
+      0.6 * Math.sin(0.08 * timeSec + 2.1);
+    const clampedDeltaT = Math.max(-5.0, Math.min(5.0, deltaT));
+    effectiveTa = Math.round((baseEnv.Ta + clampedDeltaT) * 10) / 10;
+  }
+
+  // 2. Wind speed independent airflow drift / gust turbulence (m/s) (Fluid dynamics)
+  if (baseEnv.windJitter) {
+    // Fluid turbulence with higher gust frequency and independent phase
+    const deltaWs =
+      0.8 * Math.sin(0.14 * timeSec + 1.7) +
+      0.45 * Math.cos(0.31 * timeSec + 0.4) +
+      0.25 * Math.sin(0.05 * timeSec + 3.3);
+    effectiveWs = Math.max(0, Math.round((baseEnv.Ws + deltaWs) * 10) / 10);
+  }
+
+  // 3. Solar irradiation independent optical transmission fluctuation (W/m²) (Atmospheric clear-sky optical jitter)
+  if (baseEnv.solarJitter) {
+    // Atmospheric optical transmission jitter independent of temperature and wind
+    const deltaG =
+      42 * Math.sin(0.07 * timeSec + 4.1) +
+      22 * Math.cos(0.19 * timeSec + 2.5) +
+      14 * Math.sin(0.02 * timeSec + 0.8);
+    const clampedG = Math.max(50, Math.min(1150, baseEnv.G + deltaG));
+    effectiveG = Math.round(clampedG);
+  }
+
+  return { effectiveTa, effectiveWs, effectiveG };
 }
 
 // Faiman Module Temperature Tm (°C) - Eq. (2)
@@ -181,6 +231,7 @@ export function createNewSimState(tm: number): SimStateInternal {
     maxT: tm,
     t130: 0,
     h: [],
+    envLog: [],
   };
 }
 
@@ -248,7 +299,6 @@ export function evalString(
 
   // Case 3: DC Optimizer / MLPE
   if (mode === 'optimizer') {
-    // Isolates shaded groups and performs independent tracking with 98.5% conversion efficiency
     for (let s = 0; s < 3; s++) {
       let subV = 0;
       for (let g = 4 * s; g < 4 * s + 4; g++) {
@@ -256,56 +306,57 @@ export function evalString(
         const gb = ga + 5;
         const groupV = sumCellVoltages(ga, gb, I, T, IPH, RSH);
         if (groupV < 0) {
-          // Optimizer actively bypasses negative voltage group with almost zero resistance
           const Ic = bisectCurrent(ga, gb, -I * 0.002, T, IPH, RSH, G);
           put(ga, gb, Ic);
-          subV -= I * 0.002;
+          subV += -I * 0.002;
         } else {
           put(ga, gb, I);
           subV += groupV;
         }
       }
-      V += subV * 0.985; // 98.5% MLPE conversion efficiency
+      V += subV * 0.985;
     }
     return { cv, ci, dOn, totalV: V };
   }
 
-  // Case 4: Smart Bypass (5-cell groups with MOSFET switches, Ron=5mΩ)
+  // Case 4: Smart Bypass (5-cell MOSFET switches across 12 groups)
   for (let s = 0; s < 3; s++) {
-    const a = 20 * s;
-    const b = a + 20;
     let subV = 0;
-    const subResults: Array<[number, number, number]> = [];
+    const subStart = s * 20;
+    const subEnd = subStart + 20;
 
     for (let g = 4 * s; g < 4 * s + 4; g++) {
       const ga = 5 * g;
       const gb = ga + 5;
-      if (S.arm[g]) {
-        // MOSFET turned ON: voltage clamped to -I * RON
-        const Ic = bisectCurrent(ga, gb, -I * RON, T, IPH, RSH, G);
-        subResults.push([ga, gb, Ic]);
-        subV -= I * RON;
-      } else {
-        subResults.push([ga, gb, I]);
+
+      if (!S.arm[g]) {
+        // Normal state: cells carry full string current I
+        put(ga, gb, I);
         subV += sumCellVoltages(ga, gb, I, T, IPH, RSH);
+      } else {
+        // MOSFET engaged: bypasses 5-cell group with low on-resistance RON
+        const targetV = -I * RON;
+        const Ic = bisectCurrent(ga, gb, targetV, T, IPH, RSH, G);
+        put(ga, gb, Ic);
+        subV += targetV;
       }
     }
 
+    // Secondary backup protection by 20-cell diode if subV still drops below -VD
     if (subV < -VD) {
-      // Substring diode also triggers if sum is still too negative
-      V += evalDiodeSubstring(s, a, b);
+      const Ic = bisectCurrent(subStart, subEnd, -VD, T, IPH, RSH, G);
+      put(subStart, subEnd, Ic);
+      dOn[s] = 1;
+      V += -VD;
     } else {
       V += subV;
-      for (const r of subResults) {
-        put(r[0], r[1], r[2]);
-      }
     }
   }
 
   return { cv, ci, dOn, totalV: V };
 }
 
-// Operating Point Solver: MPPT or Short-Circuit Near (IEC 61215 MQT 09)
+// Solve Operating Point (MPPT global peak vs Near Short-Circuit IEC 61215 MQT 09)
 export function solveOperatingPoint(
   S: SimStateInternal,
   mode: CircuitDefenseMode,
@@ -315,27 +366,32 @@ export function solveOperatingPoint(
   G: number,
   TmVal: number,
 ): number {
-  const Im = (ISC * G) / 1000;
+  const maxI = ((ISC * G) / 1000) * 1.02;
+
   if (op === 'sc') {
-    return Im * 0.98; // 98% of short-circuit current (severe thermal stress)
+    // 98% of short-circuit current: extreme reverse bias stress
+    return maxI * 0.98;
   }
 
-  // Global MPPT search
-  let bestP = -1e9;
-  let bestI = 0;
-  for (let k = 1; k <= 90; k++) {
-    const I = (Im * k) / 90;
-    const res = evalString(I, S, mode, IPH, RSH, G, TmVal);
-    const p = I * res.totalV;
-    if (p > bestP) {
+  // Global MPPT search: 120 points sweep for max power P = I * V
+  let bestP = -1;
+  let bestI = maxI * 0.85;
+
+  const steps = 100;
+  for (let k = 1; k <= steps; k++) {
+    const curI = (maxI * k) / steps;
+    const res = evalString(curI, S, mode, IPH, RSH, G, TmVal);
+    const p = curI * res.totalV;
+    if (p > bestP && res.totalV > 0) {
       bestP = p;
-      bestI = I;
+      bestI = curI;
     }
   }
+
   return bestI;
 }
 
-// Check trigger condition for Smart Bypass on 5-cell group g
+// Check if a 5-cell group is abnormal (voltage drop or localized temperature rise)
 export function isGroupAbnormal(
   S: SimStateInternal,
   I: number,
@@ -350,7 +406,6 @@ export function isGroupAbnormal(
   const groupV = sumCellVoltages(ga, gb, I, S.T, IPH, RSH);
   const normalV = 5 * normalCellVoltage(I, TmVal, G);
 
-  // Condition: Group voltage drops below 70% of normal OR max cell temp in group exceeds 85°C
   const voltageDropCondition = groupV < 0.7 * normalV;
   const tempCondition = Math.max(...S.T.slice(ga, gb)) > 85;
 
@@ -383,19 +438,53 @@ export function runSimulationStep(
   defect: boolean[],
   dt: number,
   defectRsh: number = 0.8,
+  stochasticJitter?: StochasticJitterOffset,
 ): SimulationMetrics {
-  const tm = calculateTm(env);
-  const { IPH, RSH } = prepareCellProperties(env.G, shade, defect, defectRsh);
-  const { rthNormal, rthDefect, ct } = getCoolingParameters(env.coolingMode);
+  // Compute independent fluctuations using separate stochastic jitter offsets if provided, or fallback to independent multi-frequency drift
+  let effectiveTa = env.Ta;
+  let effectiveWs = env.Ws;
+  let effectiveG = env.G;
+
+  if (stochasticJitter !== undefined) {
+    if (env.tempJitter && stochasticJitter.deltaTa !== undefined) {
+      // Sluggish thermal random walk strictly bounded within ±5°C
+      const clampedDeltaT = Math.max(-5.0, Math.min(5.0, stochasticJitter.deltaTa));
+      effectiveTa = Math.round((env.Ta + clampedDeltaT) * 10) / 10;
+    }
+    if (env.windJitter && stochasticJitter.deltaWs !== undefined) {
+      // Independent fluid turbulence gust random walk (m/s)
+      effectiveWs = Math.max(0, Math.round((env.Ws + stochasticJitter.deltaWs) * 10) / 10);
+    }
+    if (env.solarJitter && stochasticJitter.deltaG !== undefined) {
+      // Independent optical transmission stochastic random walk (W/m²)
+      effectiveG = Math.max(50, Math.min(1200, Math.round(env.G + stochasticJitter.deltaG)));
+    }
+  } else {
+    const fluc = calcIndependentFluctuation(env, S.t);
+    effectiveTa = fluc.effectiveTa;
+    effectiveWs = fluc.effectiveWs;
+    effectiveG = fluc.effectiveG;
+  }
+
+  const effectiveEnv: EnvironmentState = {
+    ...env,
+    Ta: effectiveTa,
+    Ws: effectiveWs,
+    G: effectiveG,
+  };
+
+  const tm = calculateTm(effectiveEnv);
+  const { IPH, RSH } = prepareCellProperties(effectiveEnv.G, shade, defect, defectRsh);
+  const { rthNormal, rthDefect, ct } = getCoolingParameters(effectiveEnv.coolingMode);
 
   // 1. Solve current operating point for active mode
-  const I = solveOperatingPoint(S, env.circuitMode, env.op, IPH, RSH, env.G, tm);
-  const evalActive = evalString(I, S, env.circuitMode, IPH, RSH, env.G, tm);
+  const I = solveOperatingPoint(S, effectiveEnv.circuitMode, effectiveEnv.op, IPH, RSH, effectiveEnv.G, tm);
+  const evalActive = evalString(I, S, effectiveEnv.circuitMode, IPH, RSH, effectiveEnv.G, tm);
   const P = Math.max(0, I * evalActive.totalV);
 
   // 2. Also solve baseline "unprotected" (none) for identical condition to calculate recovered power
-  const Inone = solveOperatingPoint(S, 'none', env.op, IPH, RSH, env.G, tm);
-  const evalNone = evalString(Inone, S, 'none', IPH, RSH, env.G, tm);
+  const Inone = solveOperatingPoint(S, 'none', effectiveEnv.op, IPH, RSH, effectiveEnv.G, tm);
+  const evalNone = evalString(Inone, S, 'none', IPH, RSH, effectiveEnv.G, tm);
   const Pnone = Math.max(0, Inone * evalNone.totalV);
 
   // 3. Thermal lumped differential equations for each cell
@@ -418,8 +507,8 @@ export function runSimulationStep(
   }
 
   // 4. Update smart bypass arm states
-  if (env.circuitMode === 'smart') {
-    updateSmartBypassArm(S, I, dt, env.lat, IPH, RSH, env.G, tm);
+  if (effectiveEnv.circuitMode === 'smart') {
+    updateSmartBypassArm(S, I, dt, effectiveEnv.lat, IPH, RSH, effectiveEnv.G, tm);
   } else {
     S.arm.fill(false);
   }
@@ -432,15 +521,37 @@ export function runSimulationStep(
   if (hot > 130) S.t130 += dt;
 
   // Ideal power under Eq. (1)
-  const Pid = Math.max(0, PSTC * (env.G / 1000) * (1 + GM * (tm - 25)));
+  const Pid = Math.max(0, PSTC * (effectiveEnv.G / 1000) * (1 + GM * (tm - 25)));
 
   // Power recovered
   const Precovered = Math.max(0, P - Pnone);
   const recoveryRatePercent = Pnone > 1 ? ((P - Pnone) / Pnone) * 100 : P > 0 ? 100 : 0;
 
-  // Push waveform history
-  if (dt > 0 && S.h.length < 3500) {
-    S.h.push([S.t, hot, P, Pid, Ph, Precovered]);
+  // Push waveform history & real-time environmental fluctuation timeline log
+  if (dt > 0) {
+    if (S.h.length < 3500) {
+      S.h.push([S.t, hot, P, Pid, Ph, Precovered]);
+    }
+    if (!S.envLog) {
+      S.envLog = [];
+    }
+    if (S.envLog.length < 5000) {
+      S.envLog.push({
+        t: Math.round(S.t * 10) / 10,
+        baseTa: env.Ta,
+        effectiveTa,
+        deltaTa: Math.round((effectiveTa - env.Ta) * 10) / 10,
+        baseWs: env.Ws,
+        effectiveWs,
+        deltaWs: Math.round((effectiveWs - env.Ws) * 10) / 10,
+        baseG: env.G,
+        effectiveG,
+        deltaG: Math.round(effectiveG - env.G),
+        tm: Math.round(tm * 10) / 10,
+        hot: Math.round(hot * 10) / 10,
+        P: Math.round(P * 10) / 10,
+      });
+    }
   }
 
   const diodeOnCount = evalActive.dOn.reduce((a, b) => a + b, 0);
@@ -461,6 +572,9 @@ export function runSimulationStep(
     diodeOnCount,
     smartOnCount,
     dOn: evalActive.dOn,
+    effectiveTa,
+    effectiveWs,
+    effectiveG,
   };
 }
 
@@ -474,7 +588,7 @@ export function solveSteadyState(
   Ws: number,
   shade: number[],
   defect: boolean[],
-): { th: number; P: number; Pid: number } {
+): { th: number; P: number; Pid: number; diodeTriggered: boolean; smartGroupsCount: number } {
   const env: EnvironmentState = {
     G,
     Ta,
@@ -485,6 +599,10 @@ export function solveSteadyState(
     lat: 0.5,
     speed: 20,
     brush: '0.6',
+    tempJitter: false,
+    windJitter: false,
+    solarJitter: false,
+    dynamicCloud: false,
   };
 
   const tm = calculateTm(env);
@@ -512,8 +630,10 @@ export function solveSteadyState(
 
   const P = Math.max(0, I * evalRes.totalV);
   const Pid = Math.max(0, PSTC * (G / 1000) * (1 + GM * (tm - 25)));
+  const diodeTriggered = evalRes.dOn.some((d) => d > 0);
+  const smartGroupsCount = S.arm.filter(Boolean).length;
 
-  return { th, P, Pid };
+  return { th, P, Pid, diodeTriggered, smartGroupsCount };
 }
 
 // Run 300-second automated benchmark comparison across multiple methods
@@ -536,7 +656,6 @@ export function run300sBenchmark(
     { modeName: '⑥ 스마트 바이패스 + 능동 수냉', circuitMode: 'smart', coolingMode: 'active-water', color: '#38bdf8' },
   ];
 
-  // First run unprotected to establish baseline energy
   const SNone = createNewSimState(calculateTm(env));
   const noneEnv = { ...env, circuitMode: 'none' as CircuitDefenseMode, coolingMode: 'natural' as CoolingMode };
   for (let t = 0; t < 300; t++) {
@@ -597,8 +716,6 @@ export function generateShadingSweep(
   const testShade = new Array(N_CELLS).fill(0);
   const testDefect = new Array(N_CELLS).fill(false);
 
-  const seriesKeys = ['none', 'diode', 'smart', 'optimizer', 'hybridWater'];
-
   for (let s = 0; s <= 100; s += 5) {
     testShade.fill(0);
     testShade[targetCellIndex] = s / 100;
@@ -639,4 +756,266 @@ export function generateShadingSweep(
   }
 
   return points;
+}
+
+// --- Experiment B Helper: Cell mapping for 2x3 block ---
+// 6 rows (0..5) x 10 cols (0..9)
+export function get2x3BlockCells(loc: ExperimentBLocation): { cells: number[]; label: string; desc: string; category: '내부 (중앙)' | '외부 (모서리)' } {
+  if (loc === 'center') {
+    // Rows 2, 3 and Cols 4, 5, 6
+    return {
+      cells: [24, 25, 26, 34, 35, 36],
+      label: '중앙 (Center)',
+      desc: '행 2~3 / 열 4~6 (24,25,26, 34,35,36번)',
+      category: '내부 (중앙)',
+    };
+  }
+  if (loc === 'top-left') {
+    // Rows 0, 1 and Cols 0, 1, 2
+    return {
+      cells: [0, 1, 2, 10, 11, 12],
+      label: '좌상단 (Top-Left)',
+      desc: '행 0~1 / 열 0~2 (0,1,2, 10,11,12번)',
+      category: '외부 (모서리)',
+    };
+  }
+  if (loc === 'top-right') {
+    // Rows 0, 1 and Cols 7, 8, 9
+    return {
+      cells: [7, 8, 9, 17, 18, 19],
+      label: '우상단 (Top-Right)',
+      desc: '행 0~1 / 열 7~9 (7,8,9, 17,18,19번)',
+      category: '외부 (모서리)',
+    };
+  }
+  if (loc === 'bottom-left') {
+    // Rows 4, 5 and Cols 0, 1, 2
+    return {
+      cells: [40, 41, 42, 50, 51, 52],
+      label: '좌하단 (Bottom-Left)',
+      desc: '행 4~5 / 열 0~2 (40,41,42, 50,51,52번)',
+      category: '외부 (모서리)',
+    };
+  }
+  // bottom-right
+  return {
+    cells: [47, 48, 49, 57, 58, 59],
+    label: '우하단 (Bottom-Right)',
+    desc: '행 4~5 / 열 7~9 (47,48,49, 57,58,59번)',
+    category: '외부 (모서리)',
+  };
+}
+
+// Run Experiment B: 5 Locations x 3 Shading levels (30%, 60%, 90%)
+export function runExperimentB_Locations(
+  baseEnv: EnvironmentState,
+  op: OperationPoint = 'mppt',
+): ExperimentBRow[] {
+  const locations: ExperimentBLocation[] = [
+    'center',
+    'top-left',
+    'top-right',
+    'bottom-left',
+    'bottom-right',
+  ];
+  const levels: Array<30 | 60 | 90> = [30, 60, 90];
+
+  const results: ExperimentBRow[] = [];
+  const testDefect = new Array(N_CELLS).fill(false);
+
+  for (const loc of locations) {
+    const { cells, label, desc, category } = get2x3BlockCells(loc);
+
+    for (const sh of levels) {
+      const shadeArray = new Array(N_CELLS).fill(0);
+      for (const idx of cells) {
+        shadeArray[idx] = sh / 100;
+      }
+
+      // None
+      const rNone = solveSteadyState('none', 'natural', op, baseEnv.G, baseEnv.Ta, baseEnv.Ws, shadeArray, testDefect);
+      // Diode
+      const rDiode = solveSteadyState('diode', 'natural', op, baseEnv.G, baseEnv.Ta, baseEnv.Ws, shadeArray, testDefect);
+      // Smart
+      const rSmart = solveSteadyState('smart', 'natural', op, baseEnv.G, baseEnv.Ta, baseEnv.Ws, shadeArray, testDefect);
+
+      const recoveredP = Math.max(0, rSmart.P - rNone.P);
+      const efficiencyRecoveryPercent = rNone.Pid > 0 ? (rSmart.P / rNone.Pid) * 100 : 0;
+
+      results.push({
+        locationId: loc,
+        locationName: label,
+        category,
+        cellsDescription: desc,
+        shadePercent: sh,
+        noneP: Math.round(rNone.P * 10) / 10,
+        noneMaxT: Math.round(rNone.th * 10) / 10,
+        diodeP: Math.round(rDiode.P * 10) / 10,
+        diodeMaxT: Math.round(rDiode.th * 10) / 10,
+        smartP: Math.round(rSmart.P * 10) / 10,
+        smartMaxT: Math.round(rSmart.th * 10) / 10,
+        recoveredP: Math.round(recoveredP * 10) / 10,
+        efficiencyRecoveryPercent: Math.round(efficiencyRecoveryPercent * 10) / 10,
+        diodeTriggered: rDiode.diodeTriggered,
+        smartCellsBypassedCount: rSmart.smartGroupsCount * 5,
+      });
+    }
+  }
+
+  return results;
+}
+
+// Run Experiment D: Extreme environmental conditions (3 categories: G 100 vs 1000, Ta -5 vs 25 vs 40, Ws 0 vs 1 vs 10)
+export function runExperimentD_Extremes(
+  shade: number[],
+  defect: boolean[],
+  op: OperationPoint = 'mppt',
+): ExperimentDRow[] {
+  const configs: Array<{
+    category: 'irradiance' | 'temperature' | 'wind';
+    categoryName: string;
+    variableLabel: string;
+    conditionDescription: string;
+    G: number;
+    Ta: number;
+    Ws: number;
+  }> = [
+    // 1. Irradiance (G) extremes
+    {
+      category: 'irradiance',
+      categoryName: '일사량 양끝조건',
+      variableLabel: 'G = 100 W/m²',
+      conditionDescription: '극저일사 (흐린 날, 기온 25℃, 풍속 1m/s 고정)',
+      G: 100,
+      Ta: 25,
+      Ws: 1,
+    },
+    {
+      category: 'irradiance',
+      categoryName: '일사량 양끝조건',
+      variableLabel: 'G = 1000 W/m²',
+      conditionDescription: '표준 정오 일사 (기온 25℃, 풍속 1m/s 고정)',
+      G: 1000,
+      Ta: 25,
+      Ws: 1,
+    },
+    // 2. Temperature (Ta) extremes
+    {
+      category: 'temperature',
+      categoryName: '외기온도 조건',
+      variableLabel: 'T_amb = -5 ℃',
+      conditionDescription: '혹한기 조건 (일사 1000W/m², 풍속 1m/s 고정)',
+      G: 1000,
+      Ta: -5,
+      Ws: 1,
+    },
+    {
+      category: 'temperature',
+      categoryName: '외기온도 조건',
+      variableLabel: 'T_amb = 25 ℃',
+      conditionDescription: '표준 상온 조건 (일사 1000W/m², 풍속 1m/s 고정)',
+      G: 1000,
+      Ta: 25,
+      Ws: 1,
+    },
+    {
+      category: 'temperature',
+      categoryName: '외기온도 조건',
+      variableLabel: 'T_amb = 40 ℃',
+      conditionDescription: '혹서기 폭염 조건 (일사 1000W/m², 풍속 1m/s 고정)',
+      G: 1000,
+      Ta: 40,
+      Ws: 1,
+    },
+    // 3. Wind speed (Ws) extremes
+    {
+      category: 'wind',
+      categoryName: '풍속 양끝조건',
+      variableLabel: 'W_s = 0 m/s',
+      conditionDescription: '무풍 극한 조건 (대류 방열 최악, 일사 1000, 기온 25)',
+      G: 1000,
+      Ta: 25,
+      Ws: 0,
+    },
+    {
+      category: 'wind',
+      categoryName: '풍속 양끝조건',
+      variableLabel: 'W_s = 1 m/s',
+      conditionDescription: '표준 미풍 조건 (일사 1000, 기온 25)',
+      G: 1000,
+      Ta: 25,
+      Ws: 1,
+    },
+    {
+      category: 'wind',
+      categoryName: '풍속 양끝조건',
+      variableLabel: 'W_s = 10 m/s',
+      conditionDescription: '강풍 급랭 조건 (강제 대류 극대화, 일사 1000, 기온 25)',
+      G: 1000,
+      Ta: 25,
+      Ws: 10,
+    },
+  ];
+
+  const rows: ExperimentDRow[] = [];
+
+  for (const c of configs) {
+    const baseEnv: EnvironmentState = {
+      G: c.G,
+      Ta: c.Ta,
+      Ws: c.Ws,
+      circuitMode: 'none',
+      coolingMode: 'natural',
+      op,
+      lat: 0.5,
+      speed: 20,
+      brush: '0.6',
+      tempJitter: false,
+      windJitter: false,
+      solarJitter: false,
+      dynamicCloud: false,
+    };
+
+    // Run 300s benchmark for each method under this condition
+    const SNone = createNewSimState(calculateTm(baseEnv));
+    for (let t = 0; t < 300; t++) {
+      runSimulationStep(SNone, baseEnv, shade, defect, 1);
+    }
+
+    const SDiode = createNewSimState(calculateTm({ ...baseEnv, circuitMode: 'diode' }));
+    for (let t = 0; t < 300; t++) {
+      runSimulationStep(SDiode, { ...baseEnv, circuitMode: 'diode' }, shade, defect, 1);
+    }
+
+    const SSmart = createNewSimState(calculateTm({ ...baseEnv, circuitMode: 'smart' }));
+    let lastSmart: SimulationMetrics = {} as SimulationMetrics;
+    for (let t = 0; t < 300; t++) {
+      lastSmart = runSimulationStep(SSmart, { ...baseEnv, circuitMode: 'smart' }, shade, defect, 1);
+    }
+
+    const noneRes = solveSteadyState('none', 'natural', op, c.G, c.Ta, c.Ws, shade, defect);
+    const diodeRes = solveSteadyState('diode', 'natural', op, c.G, c.Ta, c.Ws, shade, defect);
+
+    const recoveredPowerSmart = Math.max(0, lastSmart.P - noneRes.P);
+    const safetyRating: '정상' | '주의' | '위험' | '화재위험' =
+      SSmart.maxT < 85 ? '정상' : SSmart.maxT < 130 ? '주의' : SSmart.maxT < 300 ? '위험' : '화재위험';
+
+    rows.push({
+      category: c.category,
+      categoryName: c.categoryName,
+      variableLabel: c.variableLabel,
+      conditionDescription: c.conditionDescription,
+      noneMaxT: Math.round(SNone.maxT * 10) / 10,
+      noneP: Math.round(noneRes.P * 10) / 10,
+      diodeMaxT: Math.round(SDiode.maxT * 10) / 10,
+      diodeP: Math.round(diodeRes.P * 10) / 10,
+      smartMaxT: Math.round(SSmart.maxT * 10) / 10,
+      smartP: Math.round(lastSmart.P * 10) / 10,
+      t130SecSmart: Math.round(SSmart.t130),
+      recoveredPowerSmart: Math.round(recoveredPowerSmart * 10) / 10,
+      safetyRating,
+    });
+  }
+
+  return rows;
 }

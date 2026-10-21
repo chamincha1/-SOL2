@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, RotateCcw, FastForward, BookmarkPlus, Clock, ChevronRight, ChevronLeft } from 'lucide-react';
+import { Play, Pause, RotateCcw, FastForward, BookmarkPlus, Clock, ChevronRight, ChevronLeft, FileSpreadsheet } from 'lucide-react';
 import { TimelineMaxDuration } from '../types/solar.ts';
 
 interface TimelineScrubberProps {
@@ -13,6 +13,7 @@ interface TimelineScrubberProps {
   onResetTime: () => void;
   onScrubTime: (targetSec: number) => void;
   onOpenSaveModal: () => void;
+  onOpenEnvLogModal?: () => void;
 }
 
 export const TimelineScrubber: React.FC<TimelineScrubberProps> = ({
@@ -26,6 +27,7 @@ export const TimelineScrubber: React.FC<TimelineScrubberProps> = ({
   onResetTime,
   onScrubTime,
   onOpenSaveModal,
+  onOpenEnvLogModal,
 }) => {
   const formatTime = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -117,6 +119,17 @@ export const TimelineScrubber: React.FC<TimelineScrubberProps> = ({
               ))}
             </select>
           </div>
+
+          {onOpenEnvLogModal && (
+            <button
+              onClick={onOpenEnvLogModal}
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-cyan-300 text-xs font-semibold shadow-sm transition cursor-pointer"
+              title="실시간 환경 변동 타임라인 로그 테이블 보기"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-cyan-400" />
+              <span>환경 변동 로그</span>
+            </button>
+          )}
 
           <button
             onClick={onOpenSaveModal}

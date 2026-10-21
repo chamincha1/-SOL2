@@ -21,6 +21,12 @@ export interface MaterialConfig {
   defectRsh: number; // 0.2 to 5.0 (default 0.8 Ω)
 }
 
+export interface StochasticJitterOffset {
+  deltaTa?: number;
+  deltaWs?: number;
+  deltaG?: number;
+}
+
 export interface EnvironmentState {
   G: number; // Irradiance W/m² (100 to 1000)
   Ta: number; // Ambient Temperature °C (-5 to 40)
@@ -31,6 +37,11 @@ export interface EnvironmentState {
   lat: number; // Smart bypass sensing latency (0.1 to 10 s)
   speed: number; // 5, 20, 60
   brush: BrushMode;
+  // Natural independent fluctuations
+  tempJitter: boolean; // Independent ±5°C ambient temperature fluctuation
+  windJitter: boolean; // Independent m/s wind airflow drift / turbulence
+  solarJitter: boolean; // Independent W/m² solar irradiation fluctuation
+  dynamicCloud: boolean; // Moving cloud across the panel
 }
 
 export interface SimulationMetrics {
@@ -48,6 +59,26 @@ export interface SimulationMetrics {
   diodeOnCount: number; // 0 to 3
   smartOnCount: number; // 0 to 12
   dOn: [number, number, number]; // Diode D1, D2, D3 active states
+  // Live fluctuated effective environment
+  effectiveTa: number;
+  effectiveWs: number;
+  effectiveG: number;
+}
+
+export interface EnvironmentLogPoint {
+  t: number;          // Elapsed simulation time (s)
+  baseTa: number;     // Configured baseline ambient temperature (°C)
+  effectiveTa: number;// Actual fluctuating ambient temperature (°C)
+  deltaTa: number;    // Ta fluctuation delta (°C)
+  baseWs: number;     // Configured baseline wind speed (m/s)
+  effectiveWs: number;// Actual fluctuating wind speed (m/s)
+  deltaWs: number;    // Ws fluctuation delta (m/s)
+  baseG: number;      // Configured baseline irradiance (W/m²)
+  effectiveG: number; // Actual fluctuating irradiance (W/m²)
+  deltaG: number;     // G fluctuation delta (W/m²)
+  tm: number;         // Equilibrium module temperature calculated from effective env (°C)
+  hot: number;        // Maximum cell temperature (°C)
+  P: number;          // Current output power (W)
 }
 
 export interface SimStateInternal {
@@ -60,6 +91,7 @@ export interface SimStateInternal {
   maxT: number; // Maximum temperature reached (°C)
   t130: number; // Time spent exceeding 130°C (s)
   h: Array<[number, number, number, number, number, number]>; // [time, hot, P, Pid, Ph, Precovered]
+  envLog?: EnvironmentLogPoint[]; // Real-time environmental variables fluctuation timeline data log
 }
 
 export interface ComparisonRow {
@@ -81,6 +113,56 @@ export interface SweepPoint {
   shadePercent: number;
   temps: Record<string, number>;
   powers: Record<string, number>;
+}
+
+// Experiment B: 2x3 block shading locations (Center vs 4 Corners)
+export type ExperimentBLocation =
+  | 'center'
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right';
+
+export interface ExperimentBRow {
+  locationId: ExperimentBLocation;
+  locationName: string;
+  category: '내부 (중앙)' | '외부 (모서리)';
+  cellsDescription: string;
+  shadePercent: 30 | 60 | 90;
+  // None
+  noneP: number;
+  noneMaxT: number;
+  // Diode
+  diodeP: number;
+  diodeMaxT: number;
+  // Smart
+  smartP: number;
+  smartMaxT: number;
+  // Quantitative Gain
+  recoveredP: number; // smartP - noneP
+  efficiencyRecoveryPercent: number; // smart efficiency vs ideal
+  diodeTriggered: boolean;
+  smartCellsBypassedCount: number;
+}
+
+// Experiment D: Extreme environmental conditions
+export type ExperimentDCategory = 'irradiance' | 'temperature' | 'wind';
+
+export interface ExperimentDRow {
+  category: ExperimentDCategory;
+  categoryName: string;
+  variableLabel: string;
+  conditionDescription: string;
+  // Results for 3 defense methods
+  noneMaxT: number;
+  noneP: number;
+  diodeMaxT: number;
+  diodeP: number;
+  smartMaxT: number;
+  smartP: number;
+  t130SecSmart: number;
+  recoveredPowerSmart: number;
+  safetyRating: '정상' | '주의' | '위험' | '화재위험';
 }
 
 export interface SavedExperiment {

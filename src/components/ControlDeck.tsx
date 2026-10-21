@@ -11,6 +11,7 @@ import {
   Sparkles,
   RefreshCw,
   Layers,
+  FileSpreadsheet,
 } from 'lucide-react';
 import {
   CircuitDefenseMode,
@@ -18,6 +19,7 @@ import {
   EnvironmentState,
   MaterialConfig,
   ShadingMaterialType,
+  SimulationMetrics,
 } from '../types/solar.ts';
 
 interface ControlDeckProps {
@@ -26,6 +28,12 @@ interface ControlDeckProps {
   materialConfig: MaterialConfig;
   setMaterialConfig: React.Dispatch<React.SetStateAction<MaterialConfig>>;
   onApplyMaterialAction: (actionType: 'bird-preset' | 'leaves-scatter' | 'cloud-cover' | 'defect-preset' | 'clear-all') => void;
+  metrics?: SimulationMetrics | null;
+  taJitter?: number;
+  wsJitter?: number;
+  gJitter?: number;
+  onOpenEnvLogModal?: () => void;
+  envLogCount?: number;
 }
 
 export const ControlDeck: React.FC<ControlDeckProps> = ({
@@ -34,6 +42,12 @@ export const ControlDeck: React.FC<ControlDeckProps> = ({
   materialConfig,
   setMaterialConfig,
   onApplyMaterialAction,
+  metrics,
+  taJitter = 0,
+  wsJitter = 0,
+  gJitter = 0,
+  onOpenEnvLogModal,
+  envLogCount = 0,
 }) => {
   const materials: Array<{
     id: ShadingMaterialType;
@@ -364,17 +378,41 @@ export const ControlDeck: React.FC<ControlDeckProps> = ({
         </div>
       </div>
 
-      {/* 5. Environmental Parameters Sliders */}
-      <div className="pt-2 border-t border-slate-800/80 space-y-2.5">
-        {/* Irradiance G */}
-        <div>
-          <div className="flex justify-between text-xs text-slate-300 mb-1">
-            <span className="flex items-center space-x-1">
+      {/* 5. Environmental Parameters Sliders & Independent Fluctuations */}
+      <div className="pt-2 border-t border-slate-800/80 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-300 flex items-center space-x-1.5">
+            <Sliders className="w-3.5 h-3.5 text-amber-400" />
+            <span>자연 환경 변수 및 독립 요동 제어</span>
+          </span>
+          <span className="text-[10px] text-slate-400 font-mono">
+            독립 물리량 모델
+          </span>
+        </div>
+
+        {/* Irradiance G (Independent optical parameter with stochastic micro-jitter) */}
+        <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-1.5 text-xs text-slate-300">
               <Sun className="w-3.5 h-3.5 text-amber-400" />
-              <span>일사량 G (식 1, 2)</span>
-            </span>
-            <span className="font-mono text-amber-400 font-bold">{env.G} W/m²</span>
+              <span>일사량 G (기준 설정치)</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <span className="font-mono text-amber-400 font-bold text-xs">{env.G} W/m²</span>
+              <button
+                type="button"
+                onClick={() => setEnv((prev) => ({ ...prev, solarJitter: !prev.solarJitter }))}
+                className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border transition cursor-pointer ${
+                  env.solarJitter
+                    ? 'bg-amber-950/80 border-amber-500 text-amber-300 shadow-sm'
+                    : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {env.solarJitter ? '광학 요동 ON' : '광학 요동 OFF'}
+              </button>
+            </div>
           </div>
+
           <input
             type="range"
             min="100"
@@ -384,17 +422,40 @@ export const ControlDeck: React.FC<ControlDeckProps> = ({
             onChange={(e) => setEnv((prev) => ({ ...prev, G: parseInt(e.target.value) }))}
             className="w-full accent-amber-500 cursor-pointer"
           />
+
+          {env.solarJitter && (
+            <div className="flex items-center justify-between text-[11px] px-2 py-1 bg-amber-950/30 border border-amber-900/40 rounded-lg text-amber-300 font-mono">
+              <span>실시간 실측 일사량:</span>
+              <span className="font-bold">
+                {metrics?.effectiveG ?? env.G} W/m² ({gJitter >= 0 ? `+${Math.round(gJitter)}` : Math.round(gJitter)} W/m² 광학 랜덤워크)
+              </span>
+            </div>
+          )}
         </div>
 
-        {/* Ambient Temperature Ta */}
-        <div>
-          <div className="flex justify-between text-xs text-slate-300 mb-1">
-            <span className="flex items-center space-x-1">
+        {/* Ambient Temperature Ta with Independent ±5°C Fluctuation */}
+        <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-1.5 text-xs text-slate-300">
               <Thermometer className="w-3.5 h-3.5 text-red-400" />
-              <span>외기 온도 T_amb</span>
-            </span>
-            <span className="font-mono text-slate-200 font-bold">{env.Ta} °C</span>
+              <span>외기 온도 T_amb (기준 설정치)</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <span className="font-mono text-slate-200 font-bold text-xs">{env.Ta} °C</span>
+              <button
+                type="button"
+                onClick={() => setEnv((prev) => ({ ...prev, tempJitter: !prev.tempJitter }))}
+                className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border transition cursor-pointer ${
+                  env.tempJitter
+                    ? 'bg-red-950/80 border-red-500 text-red-300 shadow-sm'
+                    : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {env.tempJitter ? '±5℃ 요동 ON' : '±5℃ 요동 OFF'}
+              </button>
+            </div>
           </div>
+
           <input
             type="range"
             min="-5"
@@ -404,17 +465,40 @@ export const ControlDeck: React.FC<ControlDeckProps> = ({
             onChange={(e) => setEnv((prev) => ({ ...prev, Ta: parseInt(e.target.value) }))}
             className="w-full accent-red-400 cursor-pointer"
           />
+
+          {env.tempJitter && (
+            <div className="flex items-center justify-between text-[11px] px-2 py-1 bg-red-950/30 border border-red-900/40 rounded-lg text-red-300 font-mono">
+              <span>실시간 실측 기온:</span>
+              <span className="font-bold">
+                {metrics?.effectiveTa ?? env.Ta} °C ({taJitter >= 0 ? `+${taJitter.toFixed(1)}` : taJitter.toFixed(1)}℃ 열관성 랜덤워크)
+              </span>
+            </div>
+          )}
         </div>
 
-        {/* Wind Speed Ws */}
-        <div>
-          <div className="flex justify-between text-xs text-slate-300 mb-1">
-            <span className="flex items-center space-x-1">
+        {/* Wind Speed Ws with Independent Airflow Turbulence */}
+        <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-1.5 text-xs text-slate-300">
               <Wind className="w-3.5 h-3.5 text-cyan-400" />
-              <span>풍속 W_s (대류 냉각 U1)</span>
-            </span>
-            <span className="font-mono text-slate-200 font-bold">{env.Ws} m/s</span>
+              <span>풍속 W_s (기준 설정치)</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <span className="font-mono text-slate-200 font-bold text-xs">{env.Ws} m/s</span>
+              <button
+                type="button"
+                onClick={() => setEnv((prev) => ({ ...prev, windJitter: !prev.windJitter }))}
+                className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border transition cursor-pointer ${
+                  env.windJitter
+                    ? 'bg-cyan-950/80 border-cyan-500 text-cyan-300 shadow-sm'
+                    : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {env.windJitter ? '기류 요동 ON' : '기류 요동 OFF'}
+              </button>
+            </div>
           </div>
+
           <input
             type="range"
             min="0"
@@ -424,7 +508,61 @@ export const ControlDeck: React.FC<ControlDeckProps> = ({
             onChange={(e) => setEnv((prev) => ({ ...prev, Ws: parseFloat(e.target.value) }))}
             className="w-full accent-cyan-400 cursor-pointer"
           />
+
+          {env.windJitter && (
+            <div className="flex items-center justify-between text-[11px] px-2 py-1 bg-cyan-950/30 border border-cyan-900/40 rounded-lg text-cyan-300 font-mono">
+              <span>실시간 실측 풍속:</span>
+              <span className="font-bold">
+                {metrics?.effectiveWs ?? env.Ws} m/s ({wsJitter >= 0 ? `+${wsJitter.toFixed(1)}` : wsJitter.toFixed(1)} m/s 기류 랜덤워크)
+              </span>
+            </div>
+          )}
         </div>
+
+        {/* Dynamic Cloud Drift toggle */}
+        <div className="flex items-center justify-between p-2 rounded-xl bg-slate-950/40 border border-slate-800 text-xs">
+          <span className="text-slate-300 flex items-center space-x-1.5">
+            <span>☁</span>
+            <span>동적 구름 이동 모드 (바람 방향 그림자 이동)</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setEnv((prev) => ({ ...prev, dynamicCloud: !prev.dynamicCloud }))}
+            className={`text-[10px] px-2.5 py-1 rounded-md font-semibold border transition cursor-pointer ${
+              env.dynamicCloud
+                ? 'bg-indigo-950 border-indigo-500 text-indigo-300 shadow-sm'
+                : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {env.dynamicCloud ? '이동 활성' : '고정'}
+          </button>
+        </div>
+
+        {/* Real-time Environmental Timeline Log Button */}
+        {onOpenEnvLogModal && (
+          <button
+            type="button"
+            onClick={onOpenEnvLogModal}
+            className="w-full flex items-center justify-between p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-900 border border-cyan-900/50 hover:border-cyan-500/80 text-xs text-slate-200 transition group cursor-pointer shadow-sm"
+          >
+            <div className="flex items-center space-x-2">
+              <div className="p-1.5 rounded-lg bg-cyan-950 text-cyan-400 border border-cyan-800/80 group-hover:scale-105 transition-transform">
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+              </div>
+              <div className="text-left">
+                <div className="font-semibold text-white flex items-center space-x-1.5">
+                  <span>실시간 환경 변동 타임라인 로그</span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  온도·바람·일사량 요동 시계열 데이터 및 CSV 다운로드
+                </div>
+              </div>
+            </div>
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-800 shrink-0">
+              {envLogCount}건 기록
+            </span>
+          </button>
+        )}
 
         {/* Smart Bypass Latency */}
         {env.circuitMode === 'smart' && (
